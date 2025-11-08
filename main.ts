@@ -47,22 +47,128 @@ export class ShapeDetector {
   async detectShapes(imageData: ImageData): Promise<DetectionResult> {
     const startTime = performance.now();
 
-    // TODO: Implement shape detection algorithm
-    const shapes: DetectedShape[] = [];
+  const width = imageData.width;
+  const height = imageData.height;
+  const data = imageData.data;
 
-    // Placeholder implementation
-    console.log("Shape detection not implemented yet");
-    console.log("Image dimensions:", imageData.width, "x", imageData.height);
-
-    const processingTime = performance.now() - startTime;
-
-    return {
-      shapes,
-      processingTime,
-      imageWidth: imageData.width,
-      imageHeight: imageData.height,
-    };
+  // STEP 1: Convert to Grayscale
+  const gray: number[][] = [];
+  for (let y = 0; y < height; y++) {
+    gray[y] = [];
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      gray[y][x] = 0.299 * r + 0.587 * g + 0.114 * b; // luminance formula
+    }
   }
+
+  // STEP 2: Simple Edge Detection (Sobel Operator)
+  const edges: number[][] = [];
+  const sobelX = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]];
+  const sobelY = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]];
+
+  for (let y = 1; y < height - 1; y++) {
+    edges[y] = [];
+    for (let x = 1; x < width - 1; x++) {
+      let gx = 0, gy = 0;
+      for (let ky = -1; ky <= 1; ky++) {
+        for (let kx = -1; kx <= 1; kx++) {
+          gx += gray[y + ky][x + kx] * sobelX[ky + 1][kx + 1];
+          gy += gray[y + ky][x + kx] * sobelY[ky + 1][kx + 1];
+        }
+      }
+      const magnitude = Math.sqrt(gx * gx + gy * gy);
+      edges[y][x] = magnitude > 120 ? 255 : 0; // edge threshold
+    }
+  }
+
+  // STEP 3: Detect connected components (basic flood fill)
+  const visited = Array.from({ length: height }, () => Array(width).fill(false));
+  const shapes: DetectedShape[] = [];
+
+  const directions = [
+    [1, 0], [-1, 0], [0, 1], [0, -1],
+    [1, 1], [1, -1], [-1, 1], [-1, -1],
+  ];
+
+  const inBounds = (x: number, y: number) => x >= 0 && x < width && y >= 0 && y < height;
+
+  function floodFill(x: number, y: number): { points: [number, number][] } {
+    const stack: [number, number][] = [[x, y]];
+    const points: [number, number][] = [];
+
+    while (stack.length > 0) {
+      const [cx, cy] = stack.pop()!;
+      if (!inBounds(cx, cy) || visited[cy][cx] || edges[cy][cx] === 0) continue;
+      visited[cy][cx] = true;
+      points.push([cx, cy]);
+
+      for (const [dx, dy] of directions) {
+        stack.push([cx + dx, cy + dy]);
+      }
+    }
+
+    return { points };
+  }
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (!visited[y][x] && edges[y][x] > 0) {
+        const region = floodFill(x, y);
+        if (region.points.length > 50) {
+          // STEP 4: Compute shape properties
+          const xs = region.points.map(p => p[0]);
+          const ys = region.points.map(p => p[1]);
+          const minX = Math.min(...xs);
+          const maxX = Math.max(...xs);
+          const minY = Math.min(...ys);
+          const maxY = Math.max(...ys);
+          const centerX = (minX + maxX) / 2;
+          const centerY = (minY + maxY) / 2;
+          const widthBox = maxX - minX;
+          const heightBox = maxY - minY;
+          const area = widthBox * heightBox;
+
+          // STEP 5: Classify shape (rough estimation)
+          const aspectRatio = widthBox / heightBox;
+          let type = "unknown";
+          let confidence = 0.8;
+
+          if (aspectRatio > 0.9 && aspectRatio < 1.1) {
+            if (region.points.length / area > 0.7) {
+              type = "circle";
+            } else {
+              type = "square";
+            }
+          } else if (aspectRatio > 1.5 || aspectRatio < 0.67) {
+            type = "rectangle";
+          } else {
+            type = "polygon";
+          }
+
+          shapes.push({
+            type,
+            confidence,
+            boundingBox: { x: minX, y: minY, width: widthBox, height: heightBox },
+            center: { x: centerX, y: centerY },
+            area,
+          });
+        }
+      }
+    }
+  }
+
+  const processingTime = performance.now() - startTime;
+
+  return {
+    shapes,
+    processingTime,
+    imageWidth: width,
+    imageHeight: height,
+  };
+}
 
   loadImage(file: File): Promise<ImageData> {
     return new Promise((resolve, reject) => {
