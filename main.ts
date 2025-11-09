@@ -44,8 +44,8 @@ export class ShapeDetector {
    *
    * TODO: Implement shape detection algorithm here
    */
-  async detectShapes(imageData: ImageData): Promise<DetectionResult> {
-    const startTime = performance.now();
+ async detectShapes(imageData: ImageData): Promise<DetectionResult> {
+  const startTime = performance.now();
 
   const width = imageData.width;
   const height = imageData.height;
@@ -57,17 +57,15 @@ export class ShapeDetector {
     gray[y] = [];
     for (let x = 0; x < width; x++) {
       const i = (y * width + x) * 4;
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      gray[y][x] = 0.299 * r + 0.587 * g + 0.114 * b; // luminance formula
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      gray[y][x] = 0.299 * r + 0.587 * g + 0.114 * b;
     }
   }
 
-  // STEP 2: Simple Edge Detection (Sobel Operator)
+  // STEP 2: Edge Detection (Sobel)
   const edges: number[][] = [];
-  const sobelX = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]];
-  const sobelY = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]];
+  const sobelX = [[-1,0,1],[-2,0,2],[-1,0,1]];
+  const sobelY = [[-1,-2,-1],[0,0,0],[1,2,1]];
 
   for (let y = 1; y < height - 1; y++) {
     edges[y] = [];
@@ -79,87 +77,133 @@ export class ShapeDetector {
           gy += gray[y + ky][x + kx] * sobelY[ky + 1][kx + 1];
         }
       }
-      const magnitude = Math.sqrt(gx * gx + gy * gy);
-      edges[y][x] = magnitude > 120 ? 255 : 0; // edge threshold
+      const mag = Math.sqrt(gx * gx + gy * gy);
+      edges[y][x] = mag > 120 ? 255 : 0;
     }
   }
 
-  // STEP 3: Detect connected components (basic flood fill)
+  // STEP 3: Flood Fill to detect connected components
   const visited = Array.from({ length: height }, () => Array(width).fill(false));
   const shapes: DetectedShape[] = [];
-
   const directions = [
-    [1, 0], [-1, 0], [0, 1], [0, -1],
-    [1, 1], [1, -1], [-1, 1], [-1, -1],
+    [1,0],[-1,0],[0,1],[0,-1],
+    [1,1],[1,-1],[-1,1],[-1,-1]
   ];
+  const inBounds = (x:number, y:number) => x>=0 && x<width && y>=0 && y<height;
 
-  const inBounds = (x: number, y: number) => x >= 0 && x < width && y >= 0 && y < height;
-
-  function floodFill(x: number, y: number): { points: [number, number][] } {
-    const stack: [number, number][] = [[x, y]];
+  function floodFill(x:number, y:number): [number, number][] {
+    const stack: [number, number][] = [[x,y]];
     const points: [number, number][] = [];
 
-    while (stack.length > 0) {
+    while(stack.length > 0) {
       const [cx, cy] = stack.pop()!;
-      if (!inBounds(cx, cy) || visited[cy][cx] || edges[cy][cx] === 0) continue;
+      if(!inBounds(cx,cy) || visited[cy][cx] || edges[cy][cx]===0) continue;
       visited[cy][cx] = true;
       points.push([cx, cy]);
-
-      for (const [dx, dy] of directions) {
-        stack.push([cx + dx, cy + dy]);
-      }
+      for(const [dx,dy] of directions) stack.push([cx+dx, cy+dy]);
     }
-
-    return { points };
+    return points;
   }
 
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (!visited[y][x] && edges[y][x] > 0) {
-        const region = floodFill(x, y);
-        if (region.points.length > 50) {
-          // STEP 4: Compute shape properties
-          const xs = region.points.map(p => p[0]);
-          const ys = region.points.map(p => p[1]);
-          const minX = Math.min(...xs);
-          const maxX = Math.max(...xs);
-          const minY = Math.min(...ys);
-          const maxY = Math.max(...ys);
-          const centerX = (minX + maxX) / 2;
-          const centerY = (minY + maxY) / 2;
-          const widthBox = maxX - minX;
-          const heightBox = maxY - minY;
-          const area = widthBox * heightBox;
+  // STEP 4: Analyze region for shape
+  function analyzeRegion(regionPoints: [number,number][]): DetectedShape {
+    const xs = regionPoints.map(p=>p[0]);
+    const ys = regionPoints.map(p=>p[1]);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const widthBox = maxX - minX, heightBox = maxY - minY;
+    const centerX = (minX+maxX)/2, centerY=(minY+maxY)/2;
+    const area = regionPoints.length;
 
-          // STEP 5: Classify shape (rough estimation)
-          const aspectRatio = widthBox / heightBox;
-          let type = "unknown";
-          let confidence = 0.8;
+    // Approximate perimeter
+    let perimeter = 0;
+    for(let i=0;i<regionPoints.length;i++){
+      const [x1,y1]=regionPoints[i];
+      const [x2,y2]=regionPoints[(i+1)%regionPoints.length];
+      perimeter += Math.hypot(x2-x1, y2-y1);
+    }
 
-          if (aspectRatio > 0.9 && aspectRatio < 1.1) {
-            if (region.points.length / area > 0.7) {
-              type = "circle";
-            } else {
-              type = "square";
-            }
-          } else if (aspectRatio > 1.5 || aspectRatio < 0.67) {
-            type = "rectangle";
-          } else {
-            type = "polygon";
-          }
+    // Circularity metric
+    const circularity = (4 * Math.PI * area) / (perimeter * perimeter);
 
-          shapes.push({
-            type,
-            confidence,
-            boundingBox: { x: minX, y: minY, width: widthBox, height: heightBox },
-            center: { x: centerX, y: centerY },
-            area,
-          });
+    // Simplify contour using RDP to count vertices
+    const vertices = rdp(regionPoints, 0.02*regionPoints.length).length;
+
+    let type: DetectedShape["type"] = "rectangle";
+    let confidence = 0.8;
+
+    if(circularity > 0.75 && vertices<=5){
+      type = "circle";
+      confidence = Math.min(circularity,0.95);
+    } else if(vertices===3){
+      type = "triangle";
+      confidence = 0.9;
+    } else if(vertices===4){
+      const aspectRatio = widthBox/heightBox;
+      type = aspectRatio>0.9 && aspectRatio<1.1 ? "square":"rectangle";
+      confidence = 0.9;
+    } else if(vertices===5){
+      type = "pentagon";
+      confidence = 0.85;
+    } else if(vertices>=10){
+      type = "star";
+      confidence = 0.8;
+    } else {
+      type = "polygon";
+      confidence = 0.6;
+    }
+
+    return {
+      type,
+      confidence,
+      boundingBox:{x:minX,y:minY,width:widthBox,height:heightBox},
+      center:{x:centerX,y:centerY},
+      area
+    };
+  }
+
+  // RDP algorithm
+  function rdp(points:[number,number][], epsilon:number): [number,number][]{
+    if(points.length<3) return points;
+    const lineDist = (p:[number,number], a:[number,number], b:[number,number])=>{
+      const [x0,y0]=p, [x1,y1]=a, [x2,y2]=b;
+      return Math.abs((y2-y1)*x0-(x2-x1)*y0 + x2*y1 - y2*x1)/Math.hypot(y2-y1, x2-x1);
+    };
+    let maxDist=0,index=0;
+    for(let i=1;i<points.length-1;i++){
+      const d=lineDist(points[i],points[0],points[points.length-1]);
+      if(d>maxDist){ maxDist=d; index=i; }
+    }
+    if(maxDist>epsilon){
+      const left = rdp(points.slice(0,index+1), epsilon);
+      const right = rdp(points.slice(index), epsilon);
+      return [...left.slice(0,-1),...right];
+    } else {
+      return [points[0], points[points.length-1]];
+    }
+  }
+
+  // STEP 5: Loop through image to detect regions
+  for(let y=0;y<height;y++){
+    for(let x=0;x<width;x++){
+      if(!visited[y][x] && edges[y][x]>0){
+        const regionPoints = floodFill(x,y);
+        if(regionPoints.length>50){
+          shapes.push(analyzeRegion(regionPoints));
         }
       }
     }
   }
 
+  const processingTime = performance.now()-startTime;
+
+  return {
+    shapes,
+    processingTime,
+    imageWidth: width,
+    imageHeight: height
+  };
+}
   const processingTime = performance.now() - startTime;
 
   return {
