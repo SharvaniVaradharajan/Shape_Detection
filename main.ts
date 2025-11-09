@@ -8,9 +8,14 @@ export interface Point {
 }
 
 export interface DetectedShape {
-  type: "circle" | "triangle" | "rectangle" | "pentagon" | "star" | "polygon";
+  type: "circle" | "triangle" | "rectangle" | "pentagon" | "star";
   confidence: number;
-  boundingBox: { x: number; y: number; width: number; height: number };
+  boundingBox: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
   center: Point;
   area: number;
 }
@@ -31,6 +36,7 @@ export class ShapeDetector {
     this.ctx = canvas.getContext("2d")!;
   }
 
+  // Load an image into the canvas
   loadImage(file: File): Promise<ImageData> {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -46,248 +52,151 @@ export class ShapeDetector {
     });
   }
 
-  async detectShapes(imageData: ImageData): Promise<DetectionResult> {
-    const startTime = performance.now();
-    const width = imageData.width;
-    const height = imageData.height;
-    const data = imageData.data;
+  // Convert image to grayscale
+  private grayscale(imageData: ImageData): Uint8ClampedArray {
+    const gray = new Uint8ClampedArray(imageData.width * imageData.height);
+    for (let i = 0; i < imageData.data.length; i += 4) {
+      const r = imageData.data[i];
+      const g = imageData.data[i + 1];
+      const b = imageData.data[i + 2];
+      gray[i / 4] = 0.299 * r + 0.587 * g + 0.114 * b;
+    }
+    return gray;
+  }
 
-    // -------------------
-    // 1. Grayscale
-    // -------------------
-    const gray: number[][] = Array.from({ length: height }, () => Array(width).fill(0));
+  // Simple thresholding
+  private threshold(gray: Uint8ClampedArray, width: number, height: number, t: number = 128): Uint8ClampedArray {
+    const bin = new Uint8ClampedArray(width * height);
+    for (let i = 0; i < gray.length; i++) {
+      bin[i] = gray[i] > t ? 255 : 0;
+    }
+    return bin;
+  }
+
+  // Detect contours (connected white pixels)
+  private detectContours(bin: Uint8ClampedArray, width: number, height: number): Point[][] {
+    const visited = new Uint8Array(width * height);
+    const contours: Point[][] = [];
+
+    const neighbors = [
+      [-1, 0], [1, 0], [0, -1], [0, 1],
+      [-1, -1], [1, -1], [-1, 1], [1, 1],
+    ];
+
+    function inside(x: number, y: number) {
+      return x >= 0 && y >= 0 && x < width && y < height;
+    }
+
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
-        const i = (y * width + x) * 4;
-        gray[y][x] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      }
-    }
+        const idx = y * width + x;
+        if (bin[idx] === 255 && !visited[idx]) {
+          const stack: Point[] = [{ x, y }];
+          const contour: Point[] = [];
 
-    // -------------------
-    // 2. Edge detection (Sobel)
-    // -------------------
-    const edges: number[][] = Array.from({ length: height }, () => Array(width).fill(0));
-    const sobelX = [[-1,0,1],[-2,0,2],[-1,0,1]];
-    const sobelY = [[-1,-2,-1],[0,0,0],[1,2,1]];
-
-    for(let y=1;y<height-1;y++){
-      for(let x=1;x<width-1;x++){
-        let gx=0,gy=0;
-        for(let ky=-1;ky<=1;ky++){
-          for(let kx=-1;kx<=1;kx++){
-            gx += gray[y+ky][x+kx]*sobelX[ky+1][kx+1];
-            gy += gray[y+ky][x+kx]*sobelY[ky+1][kx+1];
+          while (stack.length) {
+            const p = stack.pop()!;
+            const pIdx = p.y * width + p.x;
+            if (!inside(p.x, p.y) || visited[pIdx] || bin[pIdx] === 0) continue;
+            visited[pIdx] = 1;
+            contour.push(p);
+            for (const [dx, dy] of neighbors) {
+              stack.push({ x: p.x + dx, y: p.y + dy });
+            }
           }
+
+          if (contour.length > 5) contours.push(contour);
         }
-        const mag = Math.sqrt(gx*gx + gy*gy);
-        edges[y][x] = mag>50 ? 255 : 0; // lowered threshold
       }
     }
 
-    // -------------------
-    // 3. Flood-fill to detect regions
-    // -------------------
-    const visited = Array.from({ length: height }, () => Array(width).fill(false));
+    return contours;
+  }
+
+  // Compute bounding box
+  private boundingBox(points: Point[]) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    points.forEach(p => {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    });
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+
+  // Compute polygon vertices using Ramer-Douglas-Peucker
+  private approximatePolygon(points: Point[], epsilon: number = 3): Point[] {
+    if (points.length < 3) return points;
+
+    function perpendicularDistance(pt: Point, lineStart: Point, lineEnd: Point): number {
+      const dx = lineEnd.x - lineStart.x;
+      const dy = lineEnd.y - lineStart.y;
+      if (dx === 0 && dy === 0) return Math.hypot(pt.x - lineStart.x, pt.y - lineStart.y);
+      const t = ((pt.x - lineStart.x) * dx + (pt.y - lineStart.y) * dy) / (dx * dx + dy * dy);
+      const projX = lineStart.x + t * dx;
+      const projY = lineStart.y + t * dy;
+      return Math.hypot(pt.x - projX, pt.y - projY);
+    }
+
+    function rdp(pts: Point[], eps: number): Point[] {
+      if (pts.length < 3) return pts;
+      let maxDist = 0, idx = 0;
+      const start = pts[0], end = pts[pts.length - 1];
+      for (let i = 1; i < pts.length - 1; i++) {
+        const d = perpendicularDistance(pts[i], start, end);
+        if (d > maxDist) {
+          maxDist = d;
+          idx = i;
+        }
+      }
+      if (maxDist > eps) {
+        const left = rdp(pts.slice(0, idx + 1), eps);
+        const right = rdp(pts.slice(idx), eps);
+        return [...left.slice(0, -1), ...right];
+      } else return [start, end];
+    }
+
+    return rdp(points, epsilon);
+  }
+
+  // Classify shape based on number of vertices and area ratio
+  private classifyShape(polygon: Point[], contour: Point[]): { type: DetectedShape["type"], confidence: number } {
+    const vertices = polygon.length;
+    const area = contour.length;
+    let type: DetectedShape["type"] = "circle";
+    let confidence = 0.8;
+
+    if (vertices === 3) type = "triangle";
+    else if (vertices === 4) type = "rectangle";
+    else if (vertices === 5) type = "pentagon";
+    else if (vertices > 5 && vertices <= 12) type = "star"; // heuristic
+    else type = "circle";
+
+    return { type, confidence };
+  }
+
+  // Main detection function
+  async detectShapes(imageData: ImageData): Promise<DetectionResult> {
+    const startTime = performance.now();
+    const gray = this.grayscale(imageData);
+    const bin = this.threshold(gray, imageData.width, imageData.height, 128);
+    const contours = this.detectContours(bin, imageData.width, imageData.height);
+
     const shapes: DetectedShape[] = [];
-    const directions = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
 
-    const inBounds = (x:number,y:number)=>x>=0 && x<width && y>=0 && y<height;
+    for (const contour of contours) {
+      const poly = this.approximatePolygon(contour);
+      const { type, confidence } = this.classifyShape(poly, contour);
+      const box = this.boundingBox(contour);
+      const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      const area = box.width * box.height;
 
-    function floodFill(x:number,y:number):[number,number][]{
-      const stack:[number,number][] = [[x,y]];
-      const points:[number,number][] = [];
-      while(stack.length>0){
-        const [cx,cy]=stack.pop()!;
-        if(!inBounds(cx,cy) || visited[cy][cx] || edges[cy][cx]===0) continue;
-        visited[cy][cx]=true;
-        points.push([cx,cy]);
-        for(const [dx,dy] of directions) stack.push([cx+dx,cy+dy]);
-      }
-      return points;
+      shapes.push({ type, confidence, boundingBox: box, center, area });
     }
 
-    // -------------------
-    // 4. Sort points and RDP for vertices
-    // -------------------
-    function sortPoints(points:[number,number][]):[number,number][]{
-      const cx = points.reduce((s,p)=>s+p[0],0)/points.length;
-      const cy = points.reduce((s,p)=>s+p[1],0)/points.length;
-      return points.slice().sort((a,b)=>Math.atan2(a[1]-cy,a[0]-cx)-Math.atan2(b[1]-cy,b[0]-cx));
-    }
+    const processingTime = performance.now() - startTime;
 
-    function rdp(points:[number,number][],epsilon:number):[number,number][]{
-      if(points.length<3) return points;
-      let maxDist=0,index=0;
-      const lineDist=(p:[number,number],a:[number,number],b:[number,number])=>{
-        const [x0,y0]=p,[x1,y1]=a,[x2,y2]=b;
-        return Math.abs((y2-y1)*x0-(x2-x1)*y0+x2*y1-y2*x1)/Math.hypot(y2-y1,x2-x1);
-      }
-      for(let i=1;i<points.length-1;i++){
-        const d=lineDist(points[i],points[0],points[points.length-1]);
-        if(d>maxDist){ maxDist=d; index=i; }
-      }
-      if(maxDist>epsilon){
-        const left = rdp(points.slice(0,index+1),epsilon);
-        const right = rdp(points.slice(index),epsilon);
-        return [...left.slice(0,-1),...right];
-      } else return [points[0],points[points.length-1]];
-    }
-
-    // -------------------
-    // 5. Analyze each region
-    // -------------------
-    function analyzeRegion(points:[number,number][]):DetectedShape{
-      const xs = points.map(p=>p[0]);
-      const ys = points.map(p=>p[1]);
-      const minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
-      const centerX=(minX+maxX)/2,centerY=(minY+maxY)/2;
-      const area=points.length;
-      const ordered = sortPoints(points);
-
-      let perimeter=0;
-      for(let i=0;i<ordered.length;i++){
-        const [x1,y1]=ordered[i];
-        const [x2,y2]=ordered[(i+1)%ordered.length];
-        perimeter += Math.hypot(x2-x1,y2-y1);
-      }
-
-      const circularity = (4*Math.PI*area)/(perimeter*perimeter);
-      const vertices = rdp(ordered,0.02*points.length).length;
-
-      let type:DetectedShape["type"]="polygon";
-      let confidence=0.6;
-
-      if(circularity>0.6 && vertices<=5){ type="circle"; confidence=Math.min(circularity,0.95); }
-      else if(vertices===3){ type="triangle"; confidence=0.9; }
-      else if(vertices===4){ type="rectangle"; confidence=0.9; }
-      else if(vertices===5){ type="pentagon"; confidence=0.85; }
-      else if(vertices>=10){ type="star"; confidence=0.8; }
-
-      return { type, confidence, boundingBox:{x:minX,y:minY,width:maxX-minX,height:maxY-minY}, center:{x:centerX,y:centerY}, area };
-    }
-
-    // -------------------
-    // 6. Detect all shapes
-    // -------------------
-    for(let y=0;y<height;y++){
-      for(let x=0;x<width;x++){
-        if(!visited[y][x] && edges[y][x]>0){
-          const region = floodFill(x,y);
-          if(region.length>10) shapes.push(analyzeRegion(region)); // smaller threshold
-        }
-      }
-    }
-
-    const processingTime = performance.now()-startTime;
-    return { shapes, processingTime, imageWidth: width, imageHeight: height };
+    return { shapes, processingTime, imageWidth: imageData.width, imageHeight: imageData.height };
   }
 }
-
-// -------------------------------
-// Old UI/Webpage code stays unchanged
-// -------------------------------
-class ShapeDetectionApp {
-  private detector: ShapeDetector;
-  private imageInput: HTMLInputElement;
-  private resultsDiv: HTMLDivElement;
-  private testImagesDiv: HTMLDivElement;
-  private evaluateButton: HTMLButtonElement;
-  private evaluationResultsDiv: HTMLDivElement;
-  private selectionManager: SelectionManager;
-  private evaluationManager: EvaluationManager;
-
-  constructor() {
-    const canvas = document.getElementById("originalCanvas") as HTMLCanvasElement;
-    this.detector = new ShapeDetector(canvas);
-
-    this.imageInput = document.getElementById("imageInput") as HTMLInputElement;
-    this.resultsDiv = document.getElementById("results") as HTMLDivElement;
-    this.testImagesDiv = document.getElementById("testImages") as HTMLDivElement;
-    this.evaluateButton = document.getElementById("evaluateButton") as HTMLButtonElement;
-    this.evaluationResultsDiv = document.getElementById("evaluationResults") as HTMLDivElement;
-
-    this.selectionManager = new SelectionManager();
-    this.evaluationManager = new EvaluationManager(this.detector, this.evaluateButton, this.evaluationResultsDiv);
-
-    this.setupEventListeners();
-    this.loadTestImages().catch(console.error);
-  }
-
-  private setupEventListeners(): void {
-    this.imageInput.addEventListener("change", async (event) => {
-      const file = (event.target as HTMLInputElement).files?.[0];
-      if (file) await this.processImage(file);
-    });
-
-    this.evaluateButton.addEventListener("click", async () => {
-      const selectedImages = this.selectionManager.getSelectedImages();
-      await this.evaluationManager.runSelectedEvaluation(selectedImages);
-    });
-  }
-
-  private async processImage(file: File): Promise<void> {
-    try {
-      this.resultsDiv.innerHTML = "<p>Processing...</p>";
-      const imageData = await this.detector.loadImage(file);
-      const results = await this.detector.detectShapes(imageData);
-      this.displayResults(results);
-    } catch (error) {
-      this.resultsDiv.innerHTML = `<p>Error: ${error}</p>`;
-    }
-  }
-
-  private displayResults(results: DetectionResult): void {
-    const { shapes, processingTime } = results;
-    let html = `<p><strong>Processing Time:</strong> ${processingTime.toFixed(2)}ms</p>`;
-    html += `<p><strong>Shapes Found:</strong> ${shapes.length}</p>`;
-
-    if (shapes.length > 0) {
-      html += "<h4>Detected Shapes:</h4><ul>";
-      shapes.forEach((shape) => {
-        html += `<li>
-          <strong>${shape.type}</strong><br>
-          Confidence: ${(shape.confidence * 100).toFixed(1)}%<br>
-          Center: (${shape.center.x.toFixed(1)}, ${shape.center.y.toFixed(1)})<br>
-          Area: ${shape.area.toFixed(1)}px²
-        </li>`;
-      });
-      html += "</ul>";
-    } else html += "<p>No shapes detected.</p>";
-
-    this.resultsDiv.innerHTML = html;
-  }
-
-  private async loadTestImages(): Promise<void> {
-    try {
-      const module = await import("./test-images-data.js");
-      const testImages = module.testImages;
-      const imageNames = module.getAllTestImageNames();
-      let html =
-        '<h4>Click to upload your own image or use test images for detection. Right-click test images to select/deselect:</h4><div class="test-images-grid">';
-      imageNames.forEach((imageName) => {
-        const dataUrl = testImages[imageName as keyof typeof testImages];
-        html += `<div class="test-image-item" data-image="${imageName}" onclick="loadTestImage('${imageName}','${dataUrl}')">
-          <img src="${dataUrl}" alt="${imageName}">
-          <div>${imageName}</div>
-        </div>`;
-      });
-      html += "</div>";
-      this.testImagesDiv.innerHTML = html;
-
-      (window as any).loadTestImage = async (name: string, dataUrl: string) => {
-        const response = await fetch(dataUrl);
-        const blob = await response.blob();
-        const file = new File([blob], name, { type: "image/png" });
-        const imageData = await this.detector.loadImage(file);
-        const results = await this.detector.detectShapes(imageData);
-        this.displayResults(results);
-      };
-    } catch (error) {
-      this.testImagesDiv.innerHTML = "<p>Test images not available.</p>";
-    }
-  }
-}
-
-document.addEventListener("DOMContentLoaded", () => {
-  new ShapeDetectionApp();
-});
