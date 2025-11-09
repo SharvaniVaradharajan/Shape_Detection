@@ -63,7 +63,7 @@ export class ShapeDetector {
   }
 
   // STEP 2: Edge Detection (Sobel)
-  const edges: number[][] = [];
+  const edges: number[][] = Array.from({ length: height }, () => Array(width).fill(0));
   const sobelX = [[-1,0,1],[-2,0,2],[-1,0,1]];
   const sobelY = [[-1,-2,-1],[0,0,0],[1,2,1]];
 
@@ -97,7 +97,7 @@ export class ShapeDetector {
 
     while(stack.length > 0) {
       const [cx, cy] = stack.pop()!;
-      if(!inBounds(cx,cy) || visited[cy][cx] || edges[cy][cx]===0) continue;
+      if (!inBounds(cx, cy) || !edges[cy] || visited[cy][cx] || edges[cy][cx] === 0) continue;
       visited[cy][cx] = true;
       points.push([cx, cy]);
       for(const [dx,dy] of directions) stack.push([cx+dx, cy+dy]);
